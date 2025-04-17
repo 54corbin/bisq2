@@ -69,12 +69,14 @@ import bisq.user.profile.UserProfile;
 import bisq.user.profile.UserProfileService;
 import bisq.user.reputation.ReputationScore;
 import bisq.user.reputation.ReputationService;
+import javafx.application.Platform;
 import javafx.scene.Scene;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.fxmisc.easybind.EasyBind;
 import org.fxmisc.easybind.Subscription;
 
+import javax.print.DocFlavor;
 import java.util.*;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
@@ -274,6 +276,138 @@ public class ChatMessagesListController implements bisq.desktop.common.view.Cont
                 }
             });
         }
+
+
+        //  trigger testing
+        if (channel != null ) {
+            log.info("TEMP: Triggering fake message generation...");
+            addFakeMessagesForTesting(500);
+        }
+    }
+
+    @Deprecated
+    public void addFakeMessagesForTesting(int count) {
+        ChatChannel<?> currentChannel = model.getSelectedChannel().get();
+        if (currentChannel == null) {
+            log.warn("No channel selected, cannot add fake messages.");
+            return;
+        }
+
+        UserProfile senderProfile = userIdentityService.getSelectedUserIdentity().getUserProfile();
+        String senderProfileId = senderProfile.getId(); // Get ID for constructors needing String
+        ChatChannelDomain domain = currentChannel.getChatChannelDomain();
+        String channelId = currentChannel.getId();
+        long startTime = System.currentTimeMillis();
+
+        List<ChatMessageListItem<?, ?>> fakeItems = new ArrayList<>(count);
+        List<String> fakeItemIds = new ArrayList<>(count); // Still useful for tracking added IDs
+
+        log.info("Generating {} fake messages for channel {} ({})", count, channelId, domain);
+
+        for (int i = 0; i < count; i++) {
+            String fakeTrackingId = "fake-" + UUID.randomUUID().toString();
+            long fakeTimestamp = startTime + i * 100;
+            String fakeTextContent = "This is fake message number " + (i + 1) + ".";
+            fakeTextContent = fakeTextContent + "\n" + fakeTextContent;
+            fakeTextContent = fakeTextContent + "\n" + fakeTextContent;
+            ChatMessageListItem<?, ?> fakeListItem = null;
+            ChatMessage createdMessage = null; // Store the created message temporarily
+
+            try {
+                if (currentChannel instanceof CommonPublicChatChannel specificChannel) {
+                    CommonPublicChatMessage fakeMessage = new CommonPublicChatMessage(
+                            domain,                   // chatChannelDomain
+                            channelId,                // channelId
+                            senderProfileId,          // authorUserProfileId (String)
+                            fakeTextContent,          // text (String)
+                            Optional.<Citation>empty(), // citation
+                            fakeTimestamp,            // date
+                            false                     // wasEdited
+                    );
+                    createdMessage = fakeMessage;
+
+                    fakeListItem = new ChatMessageListItem<>(
+                            fakeMessage,
+                            specificChannel,
+                            marketPriceService, userProfileService, reputationService, bisqEasyTradeService,
+                            userIdentityService, networkService, resendMessageService, authorizedBondedRolesService
+                    );
+
+                } else if (currentChannel instanceof BisqEasyOfferbookChannel specificChannel) {
+                    String messageId = fakeTrackingId;
+                    BisqEasyOfferbookMessage fakeMessage = new BisqEasyOfferbookMessage(
+                            messageId,                  // messageId (String)
+                            domain,                     // chatChannelDomain
+                            channelId,                  // channelId (String)
+                            senderProfileId,            // authorUserProfileId (String)
+                            Optional.<BisqEasyOffer>empty(), // bisqEasyOffer (empty for text message)
+                            Optional.of(fakeTextContent), // text (Optional<String>)
+                            Optional.<Citation>empty(),   // citation
+                            fakeTimestamp,              // date
+                            false,                      // wasEdited
+                            ChatMessageType.TEXT        // chatMessageType
+                    );
+                    createdMessage = fakeMessage; // Assign to generic type
+
+                    fakeListItem = new ChatMessageListItem<>(
+                            fakeMessage,
+                            specificChannel,
+                            marketPriceService, userProfileService, reputationService, bisqEasyTradeService,
+                            userIdentityService, networkService, resendMessageService, authorizedBondedRolesService
+                    );
+
+                } else if (currentChannel instanceof TwoPartyPrivateChatChannel specificChannel) {
+                    UserProfile peer = specificChannel.getPeer();
+                    String messageId = fakeTrackingId;
+                    TwoPartyPrivateChatMessage fakeMessage = new TwoPartyPrivateChatMessage(
+                            messageId, domain, channelId, senderProfile, peer.getId(), peer.getNetworkId(),
+                            fakeTextContent, Optional.empty(), fakeTimestamp, false, ChatMessageType.TEXT, new HashSet<>()
+                            // !!! Adjust this constructor call based on the *actual* signature !!!
+                    );
+                    createdMessage = fakeMessage;
+
+                    fakeListItem = new ChatMessageListItem<>(
+                            fakeMessage,
+                            specificChannel,
+                            marketPriceService, userProfileService, reputationService, bisqEasyTradeService,
+                            userIdentityService, networkService, resendMessageService, authorizedBondedRolesService
+                    );
+
+                }
+                else {
+                    log.warn("Unsupported channel type for fake message generation: {}", currentChannel.getClass().getName());
+                    continue; // Skip this iteration
+                }
+
+                if (fakeListItem != null && createdMessage != null) {
+                    fakeItems.add(fakeListItem);
+                    // Use the ID from the message object if it has one, otherwise use tracking ID
+                    String idToAdd = (createdMessage instanceof BisqEasyOfferbookMessage || createdMessage instanceof TwoPartyPrivateChatMessage)
+                            ? createdMessage.getId()
+                            : fakeTrackingId; // Fallback for CommonPublicChatMessage if it lacks getId()
+                    fakeItemIds.add(idToAdd);
+                }
+
+            } catch (Exception e) {
+                log.error("Error creating fake message item for channel type {}: {}", currentChannel.getClass().getSimpleName(), e.getMessage(), e);
+            }
+        }
+
+        log.info("Successfully generated {} fake messages. Adding to model...", fakeItems.size());
+
+        // Add to Model on JavaFX Thread
+        Platform.runLater(() -> {
+            if (fakeItems.isEmpty()) {
+                log.warn("No fake messages were generated to add.");
+                return;
+            }
+            long addStart = System.nanoTime();
+            model.getChatMessages().addAll(fakeItems);
+            model.getChatMessageIds().addAll(fakeItemIds);
+            long addEnd = System.nanoTime();
+            log.info("Added {} fake messages to model in {} ms", fakeItems.size(), (addEnd - addStart) / 1_000_000.0);
+            log.info("Fake message addition complete. Total messages: {}", model.getChatMessages().size());
+        });
     }
 
 
